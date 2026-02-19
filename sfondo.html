@@ -1,0 +1,374 @@
+
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pokémon FX — Cupola Foglie + Acqua+ Fiamme+</title>
+
+<style>
+  html,body{ height:100%; margin:0; overflow:hidden; background:#000; font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; }
+  #bg{
+    position:fixed; inset:0;
+    width:100vw; height:100vh;
+    object-fit:cover; object-position:center;
+    pointer-events:none; user-select:none; -webkit-user-drag:none;
+  }
+  #fx{
+    position:fixed; inset:0;
+    width:100vw; height:100vh;
+    background:transparent;
+  }
+  *{ user-select:none; -webkit-user-select:none; }
+</style>
+</head>
+
+<body>
+<img id="bg" alt="sfondo Pokémon">
+<canvas id="fx"></canvas>
+
+<script>
+(() => {
+  // ===============================================================
+  //                 🎛 CONTROLLI FOGLIE (cupola)
+  // ===============================================================
+  let leafRateMult      = 1.0;   // quantità foglie
+  let leafGravityMult   = 1.0;   // gravità foglie
+  let leafArcStrength   = 0.065; // risalita iniziale
+  let leafWindStrength  = 0.40;  // apertura laterale
+  let leafDomeIntensity = 1.6;   // intensità globale della cupola
+
+  // ===============================================================
+  //                         CONFIG BASE
+  // ===============================================================
+  const IMG_SRC = "Screenshot 2025-12-04 212303.png";
+
+  // UV di riferimento (0..1)
+  const UV = {
+    C:  {u:0.447, v:0.434}, // Charizard
+    BL: {u:0.096, v:0.346}, // Blastoise L
+    BR: {u:0.318, v:0.346}, // Blastoise R
+    V:  {u:0.8, v:0.304}  // Venusaur (fiore)
+  };
+
+  // SPAWN POINT (modifica questi se vuoi spostare le origini)
+  const SPAWN = {
+    charizard:      { u: UV.C.u,         v: UV.C.v         }, // fiamme
+    blastoiseL:     { u: UV.BL.u,        v: UV.BL.v        }, // acqua sx
+    blastoiseR:     { u: UV.BR.u,        v: UV.BR.v        }, // acqua dx
+    venusaurLeaf:   { u: UV.V.u - 0.015, v: UV.V.v         }  // foglie (cupola)
+  };
+
+  const THRESHOLD_FACTOR = 0.14;
+
+  // “luce blu” target sopra i cannoni
+  const WATER_TARGET_OFF = {
+    left:  {du:-0.04, dv:-0.18},
+    right: {du: 0.04, dv:-0.18}
+  };
+  const WATER_DIR_SMOOTH = 0.85;
+
+  // Potenziamenti
+  const FLAME_MULT = 1.20; // +20% fiamme
+  const WATER_MULT = 1.25; // +25% acqua
+
+  // ===============================================================
+  //                         QUALITÀ
+  // ===============================================================
+  const QUALITY = {
+    dprMax:2,
+    sizeMult:1.4,
+    lineMult:1.2,
+    glowMult:0.9,
+    maxParticles:1400,
+    rate:{
+      flame:220*FLAME_MULT,
+      water:220*WATER_MULT,
+      leaf:200
+    },
+    trail:{max:32,min:12,speedK:0.025}
+  };
+
+  // ===============================================================
+  //                         SETUP CANVAS
+  // ===============================================================
+  const bg = document.getElementById("bg"); bg.src = IMG_SRC;
+  const canvas = document.getElementById("fx");
+  const ctx = canvas.getContext("2d");
+
+  let DPR = Math.max(1, Math.min(QUALITY.dprMax, window.devicePixelRatio || 1));
+  function resizeCanvas(){
+    canvas.width  = innerWidth  * DPR;
+    canvas.height = innerHeight * DPR;
+    canvas.style.width  = innerWidth+"px";
+    canvas.style.height = innerHeight+"px";
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  addEventListener("resize",resizeCanvas,{passive:true});
+  resizeCanvas();
+
+  let imgNatural = {w:0, h:0};
+  bg.onload = () => { imgNatural.w = bg.naturalWidth; imgNatural.h = bg.naturalHeight; };
+
+  function uvToScreen(u,v){
+    const rect = bg.getBoundingClientRect();
+    const iw = imgNatural.w, ih = imgNatural.h;
+    if(!iw) return {x:u*innerWidth, y:v*innerHeight};
+    const scale = Math.max(rect.width/iw, rect.height/ih);
+    const drawW = iw*scale, drawH = ih*scale;
+    const offX = rect.left + (rect.width-drawW)/2;
+    const offY = rect.top  + (rect.height-drawH)/2;
+    return { x: offX + u*iw*scale, y: offY + v*ih*scale };
+  }
+
+  // ===============================================================
+  //                         PARTICELLE
+  // ===============================================================
+  const particles = [];
+
+  const FX = {
+    flame:{
+      baseRate: QUALITY.rate.flame, speed:[260,480],
+      size:[3.0,6.2], gravity:-0.03, drag:0.985,
+      dir:{x:-0.75,y:-0.05}, spread:Math.PI*0.32, glow:true,
+      colors:['#ff8a00','#ff4d00','#ffd166','#ff2d2d']
+    },
+    waterL:{
+      baseRate: QUALITY.rate.water, speed:[320,480],
+      size:[3.3,5.8], gravity:0.22, drag:0.995,
+      dir:{x:-0.78,y:-0.06}, spread:Math.PI*0.08, glow:true,
+      colors:['#7fd8ff','#3db8ff','#c1f0ff']
+    },
+    waterR:{
+      baseRate: QUALITY.rate.water, speed:[320,480],
+      size:[3.3,5.8], gravity:0.22, drag:0.995,
+      dir:{x:0.78,y:-0.06}, spread:Math.PI*0.08, glow:true,
+      colors:['#7fd8ff','#3db8ff','#c1f0ff']
+    },
+    leaf:{
+      baseRate: QUALITY.rate.leaf, speed:[260,430],
+      size:[3.8,6.8], baseGravity:0.018, drag:0.992,
+      dir:{x:0,y:-0.25}, spread:Math.PI*0.12, glow:false,
+      colors:['#00ff99','#22cc66','#bbffdd']
+    }
+  };
+
+  // ===============================================================
+  //                         INPUT
+  // ===============================================================
+  const STATE = {
+    pointer:{x:innerWidth/2,y:innerHeight/2},
+    waterDirL:{x:-0.78,y:-0.06},
+    waterDirR:{x:0.78,y:-0.06}
+  };
+
+  function onPointer(e){
+    if(e.touches){
+      STATE.pointer.x = e.touches[0].clientX;
+      STATE.pointer.y = e.touches[0].clientY;
+    } else {
+      STATE.pointer.x = e.clientX;
+      STATE.pointer.y = e.clientY;
+    }
+  }
+  addEventListener("mousemove",onPointer,{passive:true});
+  addEventListener("touchstart",onPointer,{passive:true});
+  addEventListener("touchmove", onPointer,{passive:true});
+
+  // ===============================================================
+  //                           SPAWN
+  // ===============================================================
+  function spawn(base, conf, dt){
+    let rate = conf.baseRate;
+    if(conf===FX.leaf) rate *= leafRateMult;
+
+    const toSpawn = rate*(dt/1000);
+    let count = Math.floor(toSpawn)+(Math.random()<(toSpawn%1)?1:0);
+    if(count<=0) return;
+    count = Math.min(count, 10);
+
+    const d = norm(conf.dir);
+    const baseAng = Math.atan2(d.y,d.x);
+
+    for(let i=0;i<count;i++){
+      if(particles.length>=QUALITY.maxParticles) break;
+
+      const ang = baseAng + (Math.random()-0.5)*conf.spread;
+      const spd = rand(conf.speed[0],conf.speed[1]);
+
+      particles.push({
+        type: conf===FX.leaf?"leaf":(conf.glow?"water":"flame"),
+        x:base.x, y:base.y,
+        vx:Math.cos(ang)*spd*0.016, vy:Math.sin(ang)*spd*0.016,
+        drag:conf.drag, gravity: conf.baseGravity ?? conf.gravity,
+        size: rand(conf.size[0],conf.size[1])*QUALITY.sizeMult,
+        color: conf.colors[(Math.random()*conf.colors.length)|0],
+        glow: conf.glow,
+        rot: Math.random()*Math.PI*2,
+        spin: rand(-0.10,0.10),
+        life: rand(580,1000), maxLife:0,
+        seedDir: (Math.random()<0.5?-1:1) // sx/dx per cupola
+      });
+      particles[particles.length-1].maxLife = particles[particles.length-1].life;
+    }
+  }
+
+  // ===============================================================
+  //                         UTILITY
+  // ===============================================================
+  const rand = (a,b)=>a+Math.random()*(b-a);
+  const norm = v => { const m=Math.hypot(v.x,v.y)||1; return {x:v.x/m,y:v.y/m}; };
+  const dist = (a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+  const lerpV = (a,b,t)=>({x:a.x+(b.x-a.x)*t, y:a.y+(b.y-a.y)*t});
+
+  // ===============================================================
+  //                        LOOP PRINCIPALE
+  // ===============================================================
+  let lastT = performance.now();
+
+  function tick(now){
+    const dt = Math.min(50, now-lastT); lastT = now;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // Posizioni “logiche” per calcoli direzione acqua
+    const P = {
+      C:  uvToScreen(UV.C.u,UV.C.v),
+      BL: uvToScreen(UV.BL.u,UV.BL.v),
+      BR: uvToScreen(UV.BR.u,UV.BR.v),
+      V:  uvToScreen(UV.V.u, UV.V.v)
+    };
+    const midB = {x:(P.BL.x+P.BR.x)/2, y:(P.BL.y+P.BR.y)/2};
+
+    // Posizioni di SPAWN reali
+    const S = {
+      flame:  uvToScreen(SPAWN.charizard.u,    SPAWN.charizard.v),
+      waterL: uvToScreen(SPAWN.blastoiseL.u,   SPAWN.blastoiseL.v),
+      waterR: uvToScreen(SPAWN.blastoiseR.u,   SPAWN.blastoiseR.v),
+      leaf:   uvToScreen(SPAWN.venusaurLeaf.u, SPAWN.venusaurLeaf.v)
+    };
+
+    // Direzione acqua → “luce blu”
+    const TL = uvToScreen(UV.BL.u+WATER_TARGET_OFF.left.du,  UV.BL.v+WATER_TARGET_OFF.left.dv);
+    const TR = uvToScreen(UV.BR.u+WATER_TARGET_OFF.right.du, UV.BR.v+WATER_TARGET_OFF.right.dv);
+    const rawL = norm({x:TL.x-P.BL.x, y:TL.y-P.BL.y});
+    const rawR = norm({x:TR.x-P.BR.x, y:TR.y-P.BR.y});
+    STATE.waterDirL = norm(lerpV(STATE.waterDirL,rawL,1-WATER_DIR_SMOOTH));
+    STATE.waterDirR = norm(lerpV(STATE.waterDirR,rawR,1-WATER_DIR_SMOOTH));
+    FX.waterL.dir = STATE.waterDirL; FX.waterR.dir = STATE.waterDirR;
+
+    // Attivazione a prossimità (resta sui punti “logici” originali)
+    const T = Math.min(innerWidth,innerHeight)*THRESHOLD_FACTOR;
+    if(dist(STATE.pointer,P.C)<=T)   spawn(S.flame, FX.flame, dt);
+    if(dist(STATE.pointer,midB)<=T){ spawn(S.waterL,FX.waterL,dt); spawn(S.waterR,FX.waterR,dt); }
+    if(dist(STATE.pointer,P.V)<=T)   spawn(S.leaf,  FX.leaf,  dt);
+
+    // Update + draw
+    for(let i=particles.length-1;i>=0;i--){
+      const p = particles[i];
+
+      p.life -= dt;
+      if(p.life<=0){ particles.splice(i,1); continue; }
+
+      p.vx *= p.drag; p.vy *= p.drag;
+
+      // 🌿 CUPOLA/risalita laterale (foglie)
+      if(p.type==="leaf"){
+        const t = 1 - (p.life / p.maxLife); // 0 → appena nata, 1 → fine
+        const arcK  = leafArcStrength  * leafDomeIntensity;
+        const windK = leafWindStrength * leafDomeIntensity;
+
+        // risalita iniziale decrescente
+        const upForce = -arcK * (1 - t);
+        p.vy += upForce * dt * 0.06;
+
+        // apertura laterale massima a metà vita
+        const dome = Math.sin(t * Math.PI);
+        const side = dome * windK * p.seedDir;
+        p.vx += side * dt * 0.06;
+
+        // oscillazione naturale
+        p.vx += Math.sin(p.life * 0.01) * 0.002;
+      }
+
+      // gravità
+      let g = p.gravity;
+      if(p.type==="leaf") g *= leafGravityMult;
+      p.vy += g * (dt*0.06);
+
+      p.x += p.vx*(dt*0.06);
+      p.y += p.vy*(dt*0.06);
+      p.rot += p.spin*(dt*0.06);
+
+      drawParticle(p);
+    }
+
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  // ===============================================================
+  //                       DRAW PARTICLES
+  // ===============================================================
+  function drawParticle(p){
+    const alpha = Math.max(0,p.life/p.maxLife);
+    ctx.globalAlpha = Math.pow(alpha,0.9);
+    ctx.fillStyle = p.color;
+
+    if(p.glow){
+      ctx.globalCompositeOperation="lighter";
+      ctx.shadowBlur = 12*QUALITY.glowMult;
+      ctx.shadowColor = p.color;
+    } else {
+      ctx.globalCompositeOperation="screen";
+      ctx.shadowBlur = 0;
+    }
+
+    if(p.type==="flame"){
+      const r = p.size*(1+(1-alpha)*0.6);
+      ctx.beginPath();
+      for(let i=0;i<3;i++){
+        const a = p.rot+i*(Math.PI*2/3);
+        const k = (i===0?1.3:1.05)*r;
+        const vx = p.x+Math.cos(a)*k;
+        const vy = p.y+Math.sin(a)*k;
+        if(i===0) ctx.moveTo(vx,vy); else ctx.lineTo(vx,vy);
+      }
+      ctx.closePath(); ctx.fill();
+      return;
+    }
+
+    if(p.type==="water"){
+      const spd = Math.hypot(p.vx,p.vy)/0.016;
+      const trail = Math.min(QUALITY.trail.max*QUALITY.sizeMult,
+                             Math.max(QUALITY.trail.min, spd*QUALITY.trail.speedK));
+      const len = Math.hypot(p.vx,p.vy)||1;
+      const tx=(p.vx/len)*trail, ty=(p.vy/len)*trail;
+
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = Math.max(1.5,p.size*0.75)*QUALITY.lineMult;
+
+      ctx.beginPath();
+      ctx.moveTo(p.x-tx,p.y-ty);
+      ctx.lineTo(p.x,p.y);
+      ctx.stroke();
+      return;
+    }
+
+    // Foglie
+    ctx.save();
+    ctx.translate(p.x,p.y);
+    ctx.rotate(p.rot);
+    ctx.scale(1.16,0.75);
+    ctx.beginPath();
+    ctx.moveTo(0,-p.size*1.5);
+    ctx.quadraticCurveTo(p.size*1.2,-p.size*0.4, 0,p.size*1.6);
+    ctx.quadraticCurveTo(-p.size*1.2,-p.size*0.4,0,-p.size*1.5);
+    ctx.fill();
+    ctx.restore();
+  }
+
+})();
+</script>
+
+</body>
+</html>
